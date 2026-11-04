@@ -15,6 +15,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.6", features = ["trace"] }
 reqwest = { version = "0.12", features = ["json"] }
+tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4", "with-uuid-1"] }
+redis = { version = "1.8.1", features = ["tokio-comp", "connection-manager"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

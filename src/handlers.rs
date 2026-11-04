@@ -1,5 +1,6 @@
 //! HTTP route handlers implementing the FlashDrop REST application interface.
 
+use crate::db::fetch_order_postgres;
 use crate::models::{
     CreateOrderRequest, CreateOrderResponse, ErrorResponse, Order, OrderQueueMessage, OrderStatus,
 };
@@ -54,17 +55,24 @@ pub async fn get_order_status_handler(
     State(state): State<AppState>,
     Path(order_id): Path<String>,
 ) -> Response {
-    match state.get_order(&order_id) {
-        Some(order) => (StatusCode::OK, Json(order)).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "ORDER_NOT_FOUND".to_string(),
-                message: format!("No order located with identifier '{order_id}'"),
-            }),
-        )
-            .into_response(),
+    if let Some(order) = state.get_order(&order_id) {
+        return (StatusCode::OK, Json(order)).into_response();
     }
+
+    if let Some(ref pg_client) = state.postgres_client {
+        if let Ok(Some(order)) = fetch_order_postgres(pg_client, &order_id).await {
+            return (StatusCode::OK, Json(order)).into_response();
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "ORDER_NOT_FOUND".to_string(),
+            message: format!("No order located with identifier '{order_id}'"),
+        }),
+    )
+        .into_response()
 }
 
 /// HTTP handler providing an active health check and remaining inventory overview.
@@ -145,7 +153,10 @@ async fn execute_order_placement(
     payload: CreateOrderRequest,
     assigned_order_id: String,
 ) -> Response {
-    match state.reserve_inventory(&payload.product_id, payload.quantity) {
+    match state
+        .reserve_inventory_async(&payload.product_id, payload.quantity)
+        .await
+    {
         Ok(_) => {
             let order_record = Order {
                 order_id: assigned_order_id.clone(),

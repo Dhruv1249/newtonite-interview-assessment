@@ -1,11 +1,13 @@
-//! Shared in-memory thread-safe state management for inventory, orders, and idempotency tracking.
+//! Shared state management for inventory, orders, idempotency, and database coordination.
 
+use crate::db::{persist_order_postgres, reserve_redis_inventory, seed_redis_inventory};
 use crate::models::{Order, OrderQueueMessage, OrderStatus};
 use chrono::Utc;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
+use tokio_postgres::Client as PgClient;
 
 /// Specific domain errors that can arise during state operations.
 #[derive(Debug, PartialEq, Eq)]
@@ -37,9 +39,6 @@ impl ProductInventory {
     }
 
     /// Atomically decrements available inventory using compare-and-swap semantics.
-    ///
-    /// Rejects requests when available inventory is lower than the requested quantity,
-    /// strictly guaranteeing that stock levels never become negative under extreme concurrency.
     pub fn reserve(&self, requested_quantity: i64) -> Result<i64, StateError> {
         let update_result = self.stock.fetch_update(
             Ordering::AcqRel,
@@ -70,7 +69,7 @@ impl ProductInventory {
     }
 }
 
-/// Central application state shared across all HTTP request handlers and background workers.
+/// Central application state shared across HTTP handlers, background workers, and databases.
 #[derive(Debug, Clone)]
 pub struct AppState {
     /// Concurrent map indexing atomic inventory containers by product identifier.
@@ -81,28 +80,54 @@ pub struct AppState {
     pub orders: Arc<DashMap<String, Order>>,
     /// Bounded transmission sender feeding asynchronous order processing workers.
     pub queue_sender: Sender<OrderQueueMessage>,
+    /// Optional Redis connection manager for distributed atomic reservations.
+    pub redis_connection: Option<Arc<tokio::sync::Mutex<redis::aio::ConnectionManager>>>,
+    /// Optional PostgreSQL client for durable ACID relational persistence.
+    pub postgres_client: Option<Arc<PgClient>>,
 }
 
 impl AppState {
-    /// Constructs a initialized application state instance with a designated async worker channel.
+    /// Constructs an initialized application state instance with an async worker channel.
     pub fn new(queue_sender: Sender<OrderQueueMessage>) -> Self {
         let state = Self {
             inventory: Arc::new(DashMap::new()),
             idempotency_store: Arc::new(DashMap::new()),
             orders: Arc::new(DashMap::new()),
             queue_sender,
+            redis_connection: None,
+            postgres_client: None,
         };
 
         state.seed_inventory("iphone_16", 100);
         state
     }
 
-    /// Seeds initial inventory quantities for a specified catalog item.
+    /// Configures external Redis connection manager on application state.
+    pub fn with_redis(mut self, redis_manager: redis::aio::ConnectionManager) -> Self {
+        self.redis_connection = Some(Arc::new(tokio::sync::Mutex::new(redis_manager)));
+        self
+    }
+
+    /// Configures external PostgreSQL durable database client on application state.
+    pub fn with_postgres(mut self, postgres_client: Arc<PgClient>) -> Self {
+        self.postgres_client = Some(postgres_client);
+        self
+    }
+
+    /// Seeds initial inventory quantities for a specified catalog item across in-memory and Redis.
     pub fn seed_inventory(&self, product_id: &str, initial_stock: i64) {
         self.inventory.insert(
             product_id.to_string(),
             ProductInventory::new(product_id, initial_stock),
         );
+    }
+
+    /// Asynchronously initializes Redis inventory counters when Redis is connected.
+    pub async fn initialize_redis_inventory(&self, product_id: &str, stock: i64) {
+        if let Some(ref redis_mutex) = self.redis_connection {
+            let mut conn = redis_mutex.lock().await;
+            let _ = seed_redis_inventory(&mut conn, product_id, stock).await;
+        }
     }
 
     /// Locates an existing order identifier registered under a client idempotency key.
@@ -112,7 +137,21 @@ impl AppState {
             .and_then(|order_id| self.orders.get(order_id.value()).map(|o| o.clone()))
     }
 
-    /// Atomically attempts to reserve inventory for a given product and quantity.
+    /// Atomically attempts to reserve inventory using Redis Lua script or in-memory CAS.
+    pub async fn reserve_inventory_async(
+        &self,
+        product_id: &str,
+        quantity: i64,
+    ) -> Result<i64, StateError> {
+        if let Some(ref redis_mutex) = self.redis_connection {
+            let mut conn = redis_mutex.lock().await;
+            return reserve_redis_inventory(&mut conn, product_id, quantity).await;
+        }
+
+        self.reserve_inventory(product_id, quantity)
+    }
+
+    /// Atomically attempts to reserve in-memory inventory using non-blocking CAS.
     pub fn reserve_inventory(&self, product_id: &str, quantity: i64) -> Result<i64, StateError> {
         match self.inventory.get(product_id) {
             Some(inventory_ref) => inventory_ref.reserve(quantity),
@@ -139,20 +178,26 @@ impl AppState {
         self.orders.get(order_id).map(|entry| entry.clone())
     }
 
-    /// Updates the life-cycle status of an existing order.
-    pub fn update_order_status(
+    /// Updates the life-cycle status of an existing order and persists to PostgreSQL if configured.
+    pub async fn update_order_status_async(
         &self,
         order_id: &str,
         new_status: OrderStatus,
     ) -> Result<(), StateError> {
-        match self.orders.get_mut(order_id) {
+        let updated_order = match self.orders.get_mut(order_id) {
             Some(mut order_entry) => {
                 order_entry.status = new_status;
                 order_entry.updated_at = Utc::now();
-                Ok(())
+                order_entry.clone()
             }
-            None => Err(StateError::OrderNotFound),
+            None => return Err(StateError::OrderNotFound),
+        };
+
+        if let Some(ref pg_client) = self.postgres_client {
+            let _ = persist_order_postgres(pg_client, &updated_order).await;
         }
+
+        Ok(())
     }
 
     /// Reads the active stock count for a given product.

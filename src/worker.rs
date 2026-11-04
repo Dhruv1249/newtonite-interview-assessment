@@ -51,7 +51,8 @@ impl OrderWorker {
 
         match self
             .app_state
-            .update_order_status(&task.order_id, OrderStatus::Confirmed)
+            .update_order_status_async(&task.order_id, OrderStatus::Confirmed)
+            .await
         {
             Ok(_) => {
                 info!(

@@ -205,7 +205,10 @@ async fn execute_order_placement(
                 StatusCode::NOT_FOUND,
                 Json(ErrorResponse {
                     error: "PRODUCT_NOT_FOUND".to_string(),
-                    message: format!("Target product '{}' not found in catalog", payload.product_id),
+                    message: format!(
+                        "Target product '{}' not found in catalog",
+                        payload.product_id
+                    ),
                 }),
             )
                 .into_response()

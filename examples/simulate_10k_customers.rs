@@ -19,8 +19,8 @@ pub const CONCURRENCY_WINDOW_LIMIT: usize = 500;
 /// Entry point executing the 10,000 customer HTTP load simulation against FlashDrop.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let target_base_url = std::env::var("TARGET_URL")
-        .unwrap_or_else(|_| DEFAULT_TARGET_BASE_URL.to_string());
+    let target_base_url =
+        std::env::var("TARGET_URL").unwrap_or_else(|_| DEFAULT_TARGET_BASE_URL.to_string());
 
     println!("===========================================================");
     println!(" FlashDrop: 10,000 Customer High-Concurrency Flash Sale Sim");
@@ -95,12 +95,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_accepted = accepted_orders_counter.load(Ordering::SeqCst);
     let total_conflicts = conflict_rejections_counter.load(Ordering::SeqCst);
     let total_failures = anomalous_failures_counter.load(Ordering::SeqCst);
-    let requests_per_second =
-        (TOTAL_SIMULATED_CUSTOMERS as f64) / elapsed_duration.as_secs_f64();
+    let requests_per_second = (TOTAL_SIMULATED_CUSTOMERS as f64) / elapsed_duration.as_secs_f64();
 
     println!("\n---------------- Simulation Results ----------------");
     println!("Elapsed Time:           {:.2?}", elapsed_duration);
-    println!("Throughput:             {:.2} requests/sec", requests_per_second);
+    println!(
+        "Throughput:             {:.2} requests/sec",
+        requests_per_second
+    );
     println!("202 ACCEPTED (Purchased): {}", total_accepted);
     println!("409 CONFLICT (Sold Out):  {}", total_conflicts);
     println!("Anomalous Failures:     {}", total_failures);

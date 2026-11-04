@@ -40,17 +40,15 @@ impl ProductInventory {
 
     /// Atomically decrements available inventory using compare-and-swap semantics.
     pub fn reserve(&self, requested_quantity: i64) -> Result<i64, StateError> {
-        let update_result = self.stock.fetch_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current_stock| {
-                if current_stock >= requested_quantity {
-                    Some(current_stock - requested_quantity)
-                } else {
-                    None
-                }
-            },
-        );
+        let update_result =
+            self.stock
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current_stock| {
+                    if current_stock >= requested_quantity {
+                        Some(current_stock - requested_quantity)
+                    } else {
+                        None
+                    }
+                });
 
         match update_result {
             Ok(previous_stock) => Ok(previous_stock - requested_quantity),

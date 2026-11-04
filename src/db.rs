@@ -26,7 +26,10 @@ pub async fn connect_redis(
 ) -> Result<redis::aio::ConnectionManager, Box<dyn std::error::Error + Send + Sync>> {
     let client = redis::Client::open(redis_url)?;
     let connection_manager = redis::aio::ConnectionManager::new(client).await?;
-    info!(redis_url, "Successfully connected to Redis cluster/instance");
+    info!(
+        redis_url,
+        "Successfully connected to Redis cluster/instance"
+    );
     Ok(connection_manager)
 }
 

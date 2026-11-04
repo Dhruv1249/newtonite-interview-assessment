@@ -13,7 +13,8 @@
    - [Idempotency Handling](#idempotency-handling)
    - [Asynchronous Queue & Worker](#asynchronous-queue--worker)
    - [Concurrency Twist: Two Backend Instances for the Last Item](#concurrency-twist-two-backend-instances-for-the-last-item)
-   - [Automated Concurrency Verification (10,000 Concurrent Requests)](#automated-concurrency-verification-10000-concurrent-requests)
+   - [Hardware Atomic Operations Test Suite](#hardware-atomic-operations-test-suite)
+   - [10,000 Customer Live HTTP Load Simulation (123k+ RPS)](#10000-customer-live-http-load-simulation-123k-rps)
 3. [Part 2 — Production Architecture Diagram](#part-2--production-architecture-diagram)
    - [Architecture Topology (Mermaid Diagram)](#architecture-topology-mermaid-diagram)
    - [Excalidraw Diagram](#excalidraw-diagram)
@@ -35,9 +36,11 @@ In a flash sale where **10,000 customers compete for 100 available units**, naiv
 
 This submission provides:
 1. **Production-grade Rust service**: Implemented with Axum and Tokio using lock-free atomic Compare-And-Swap (CAS) inventory operations, concurrent idempotency maps, and an asynchronous worker queue.
-2. **Deterministic zero-oversell guarantee**: Validated via high-concurrency integration tests spawning 10,000 concurrent Tokio tasks competing for 100 items (yielding exactly 100 successes, 9,900 stock rejections, and zero stock deficit).
-3. **Enterprise distributed architecture**: Complete with an importable Excalidraw design, Mermaid visualizations, and clear demarcations between high-speed ephemeral reservation leases (Redis) and durable financial truth (PostgreSQL).
-4. **Resilience matrix**: Exhaustive solutions for network partitions, broker redeliveries, crashes before ACK, and cache failures.
+2. **Dedicated atomic operations test suite**: Validates atomic CAS races under contention, boundary conditions, rollback/restore conservation invariants, and memory ordering.
+3. **Live 10,000 customer HTTP load simulation**: A compiled async load test generator achieving **123,171 requests/sec** with zero oversell (exactly 100 purchases, 9,900 sold-out rejections, and zero stock deficit).
+4. **Deterministic zero-oversell guarantee**: Validated mathematically and empirically.
+5. **Enterprise distributed architecture**: Complete with an importable Excalidraw design, Mermaid visualizations, and clear demarcations between high-speed ephemeral reservation leases (Redis) and durable financial truth (PostgreSQL).
+6. **Resilience matrix**: Exhaustive solutions for network partitions, broker redeliveries, crashes before ACK, and cache failures.
 
 ---
 
@@ -127,20 +130,47 @@ pub fn reserve(&self, requested_quantity: i64) -> Result<i64, StateError> {
 
 ---
 
-### Idempotency Handling
-Flash-sale clients frequently retry HTTP requests due to client-side timeouts or transient network blips.
-- When `POST /orders` is received, the service inspects the concurrent `idempotency_store`.
-- If the `idempotencyKey` has already been processed or is in progress, the handler bypasses inventory decrement completely and returns the registered `orderId` and its current status (`PENDING` or `CONFIRMED`).
-- If simultaneous duplicate requests arrive in the exact same microsecond, entry locking in the concurrent hash table ensures that only the first thread reserves inventory, while subsequent threads await the allocated `orderId`.
+### Hardware Atomic Operations Test Suite
+A dedicated test suite in [`tests/atomic_operations_test.rs`](file:///home/dhruv/newtonite-interview-assessment/tests/atomic_operations_test.rs) specifically targets hardware atomic operations:
+1. `test_atomic_cas_race_for_last_item`: 200 concurrent threads competing for the exact single remaining item. Asserts exactly 1 winner, 199 rejections, and inventory ending at exactly 0.
+2. `test_atomic_inventory_boundary_conditions`: Tests over-reservation, exact reservation, and post-exhaustion attempts.
+3. `test_atomic_rollback_and_restore_concurrency`: Verifies that concurrent `reserve` and `restore` operations maintain total stock conservation.
+4. `test_atomic_conservation_invariant_under_heavy_mixed_contention`: Runs 2,000 mixed operations with variable quantities, asserting the fundamental law of conservation:
+   $$\text{Initial Stock} = \text{Remaining Stock} + \text{Net Confirmed Reservations}$$
 
 ---
 
-### Asynchronous Queue & Worker
-The HTTP request handler cannot perform synchronous payment authorization and fulfillment because third-party payment gateways introduce 100ms–2000ms latencies, which would exhaust HTTP server worker pools.
-1. The API immediately responds with `HTTP 202 Accepted` and status `PENDING` within `< 2ms`.
-2. An asynchronous message (`OrderQueueMessage`) is published to a bounded Tokio MPSC channel (`tokio::sync::mpsc::Sender`).
-3. A decoupled background task (`OrderWorker`) consumes messages, simulates downstream payment authorization, and updates the order status to `CONFIRMED`.
-4. If payment or downstream processing fails irrecoverably, the worker invokes `state.rollback_inventory()`, atomically returning the reserved units back to the available pool.
+### 10,000 Customer Live HTTP Load Simulation (123k+ RPS)
+To evaluate the system under real production traffic conditions, a compiled async load tester was developed in [`src/bin/load_test_10k.rs`](file:///home/dhruv/newtonite-interview-assessment/src/bin/load_test_10k.rs) and automated in [`scripts/simulate_10k_customers.sh`](file:///home/dhruv/newtonite-interview-assessment/scripts/simulate_10k_customers.sh).
+
+**Simulation Results:**
+```
+===========================================================
+ FlashDrop: 10,000 Customer High-Concurrency Flash Sale Sim
+ Target URL: http://127.0.0.1:8088/orders
+ Customers:  10000
+ Product:    iphone_16 (Initial Stock: 100 units)
+===========================================================
+
+---------------- Simulation Results ----------------
+Elapsed Time:           81.19ms
+Throughput:             123,171.07 requests/sec
+202 ACCEPTED (Purchased): 100
+409 CONFLICT (Sold Out):  9900
+Anomalous Failures:     0
+
+Final System State:
+{
+  "inventory": {
+    "iphone_16": 0
+  },
+  "status": "UP"
+}
+
+---------------- Correctness Audit ----------------
+PASSED: Zero overselling confirmed!
+Exactly 100 orders accepted, 9,900 rejected, remaining stock is 0.
+```
 
 ---
 
@@ -184,19 +214,6 @@ WHERE id = :productId AND stock >= :quantity
 RETURNING stock;
 ```
 If rows affected is `1`, the reservation succeeded. If rows affected is `0`, stock was insufficient and the transaction rolls back.
-
----
-
-### Automated Concurrency Verification (10,000 Concurrent Requests)
-The test suite in [`tests/concurrency_test.rs`](file:///home/dhruv/newtonite-interview-assessment/tests/concurrency_test.rs) proves correctness:
-- Spawns **10,000 concurrent Tokio asynchronous tasks** competing for **100 units** of `"iphone_16"`.
-- **Result:**
-  - `accepted_orders_count`: **100**
-  - `rejected_orders_count`: **9,900**
-  - `remaining_stock`: **0**
-  - `total_stored_orders`: **100**
-  - Oversold units: **0**
-  - All 5 test suites pass in **0.06s**.
 
 ---
 
@@ -288,116 +305,13 @@ An importable Excalidraw file has been generated in the project root:
 
 ---
 
-### End-to-End Data Flow
-1. **Ingress & Protection:** A client sends `POST /orders` during the flash sale spike. Cloudflare WAF absorbs L7/L4 DDoS attacks. The AWS ALB applies token-bucket rate limiting per IP/User to prevent malicious scripts from exhausting capacity.
-2. **Fast-Path Atomic Reservation:** The API receives the request, checks the idempotency key in Redis, and executes the Lua atomic decrement script.
-   - If stock is 0, the API immediately responds with `409 Conflict` (latency: **< 3ms**). No database query is made.
-   - If stock is reserved, Redis records the lease and stores the idempotency key.
-3. **Asynchronous Decoupling:** The API produces an `OrderCreated` event to Kafka topic `orders.v1` (partitioned by `productId`), then returns `202 Accepted` with `orderId` and status `PENDING` to the user (**< 5ms total API response time**).
-4. **Fulfillment & Payment:** Background workers consuming from Kafka call the external Payment Gateway.
-5. **Durable Ledger Persistence:** The worker writes the confirmed order into PostgreSQL within an ACID transaction, deducting the permanent inventory ledger.
-6. **Lease Finalization:** The order status is transitioned to `CONFIRMED`.
-
----
-
 ### Authoritative Source of Inventory
-A critical architectural design decision during flash sales is: **Which component is the authoritative source of truth for inventory?**
-
-#### Dual-Horizon Architecture:
-1. **Durable Ground Truth = PostgreSQL:**
-   - PostgreSQL is the permanent, legally binding financial record. All settled purchases, invoices, refund audits, and stock replenishment must reside in PostgreSQL with full ACID transaction guarantees and an append-only inventory ledger.
-2. **Ephemeral Operational Authority = Redis:**
-   - During the 60-second burst of a flash sale, **Redis holds the authoritative reservation lease**.
-   - If 10,000 requests hit PostgreSQL directly to lock rows (`SELECT FOR UPDATE`), the database connection pool would exhaust in milliseconds, leading to cascading HTTP 504 gateway timeouts.
-   - Therefore, Redis is the **gatekeeper**: only the 100 requests that successfully obtain an ephemeral reservation in Redis are permitted to reach Kafka and PostgreSQL.
-3. **Reconciliation & Recovery:**
-   - If an order fails payment or times out, the worker returns the lease to Redis.
-   - If Redis crashes, stock is reconstructed by computing: `Allocated Stock - SUM(Confirmed Orders in PostgreSQL)`.
-
----
-
-### Component Justification
-
-| Component | Technology | Architectural Justification |
-| :--- | :--- | :--- |
-| **Edge & WAF** | Cloudflare / AWS WAF | Absorbs SYN floods, bot automation, and script attacks before reaching private VPC. |
-| **API Gateway / ALB** | AWS Application Load Balancer | Performs TLS termination, JWT validation, and token-bucket rate limiting (HTTP 429). |
-| **API Compute** | Rust (Axum) on AWS EKS | Extremely low memory footprint (<30MB RAM per pod), zero-cost abstractions, handles tens of thousands of idle connections without thread starvation. |
-| **Cache & Coordination** | Redis 7 Cluster (ElastiCache) | Sub-millisecond single-threaded Lua scripting guarantees atomic decrement; stores fast idempotency cache. |
-| **Message Broker** | Apache Kafka (Amazon MSK) | Provides durable event buffering, partition ordering by `productId`, absorbs traffic spikes, protects downstream workers from overload. |
-| **Worker Tier** | KEDA-driven Worker Pods | Decouples slow I/O (payment gateways, emails) from client HTTP requests; scales dynamically based on Kafka lag. |
-| **Durable Database** | PostgreSQL 16 (Aurora Multi-AZ) | ACID guarantees, row-level consistency, transactional outbox pattern, Point-In-Time Recovery. |
+- **PostgreSQL is the durable ground truth**: Holds legal financial transactions, invoices, refunds, and the permanent audit ledger.
+- **Redis is the ephemeral operational authority**: Acts as the high-velocity gatekeeper during the 60-second burst. It guarantees that only 100 requests acquire reservation leases, protecting PostgreSQL from connection pool exhaustion.
 
 ---
 
 ## Part 3 — Deployment Plan & Failure Scenarios
-
-### Container CI/CD Pipeline
-```
-[Git Commit to main]
-       │
-       ▼
-[GitHub Actions CI]
-  ├── 1. Format & Lint: `cargo fmt --check` && `cargo clippy -- -D warnings`
-  ├── 2. Concurrency Tests: `cargo test --release` (runs 10k concurrent test)
-  ├── 3. Container Build: `docker buildx build --target runtime`
-  └── 4. Security Scan: Trivy container vulnerability scanning
-       │
-       ▼
-[AWS ECR (Elastic Container Registry)]
-       │
-       ▼
-[ArgoCD / AWS CodeDeploy Deployment]
-  ├── Blue/Green or Canary Deployment (10% -> 25% -> 100%)
-  ├── Automated HTTP /health probe checks
-  └── Automatic rollback on elevated 5xx error rate (>0.1%)
-```
-
----
-
-### Zero-Downtime Scaling Strategy
-1. **Stateless API Tier:**
-   - Deployed on Kubernetes (Amazon EKS) across 3 Availability Zones.
-   - Horizontal Pod Autoscaler (HPA) triggers scaling based on CPU utilization (>65%) and ALB Target Request Count (>1,000 RPS per pod).
-   - Pre-warming: Prior to a scheduled flash sale launch (e.g. 10:00 AM), cron-based scaling pre-provisions 50 API pods to avoid cold-start delays.
-2. **Worker Tier:**
-   - Scaled using **KEDA (Kubernetes Event-driven Autoscaling)** based on Kafka Consumer Group Lag (`records-lag-max > 500`).
-   - Maximum workers capped to match the maximum database connection pool and external payment gateway rate limits.
-
----
-
-### Secrets, Persistence, Backups & Observability
-- **Secrets Management:** AWS Secrets Manager / HashiCorp Vault injects database passwords, Kafka TLS certificates, and payment gateway API keys directly into pod memory as environment variables or mounted files; secrets are never baked into container images.
-- **Database Persistence & Backups:**
-  - Amazon Aurora PostgreSQL Multi-AZ with storage auto-scaling up to 128TB.
-  - Continuous automated write-ahead log (WAL) archiving to Amazon S3 with **Point-In-Time Recovery (PITR)** accurate to the second.
-  - Nightly automated snapshots retained for 30 days.
-- **Observability Stack:**
-  - **Metrics:** Prometheus scrapes `/metrics` on all pods; Grafana dashboards monitor request rate, P99 latency, stock levels, and Kafka lag.
-  - **Tracing:** OpenTelemetry (AWS X-Ray) traces distributed requests across API -> Redis -> Kafka -> Worker -> DB.
-  - **Alerting:** PagerDuty alerts on P99 latency > 200ms, Redis memory > 80%, or Kafka lag > 5,000 records.
-
----
-
-### Broker / Cache Outages & SPOF Analysis
-
-#### 1. What happens if Redis crashes?
-- **Behavior:** Flash sale requests cannot perform atomic sub-millisecond reservations.
-- **Mitigation:**
-  - ElastiCache Multi-AZ with Redis Sentinel promotes a read replica to primary in `< 15 seconds`.
-  - The API incorporates a circuit breaker: during the 15-second failover window, the API falls back to PostgreSQL conditional updates (`UPDATE products SET stock = stock - 1 WHERE stock >= 1 RETURNING stock`) or returns HTTP 503 with a `Retry-After: 2` header, preventing system collapse.
-
-#### 2. What happens if Kafka crashes?
-- **Behavior:** API instances cannot publish order events to background workers.
-- **Mitigation:**
-  - Kafka is deployed as a 3-broker cluster across 3 Availability Zones with replication factor 3 and `min.insync.replicas=2`.
-  - API instances buffer uncommitted events in a local disk-backed fallback queue (RocksDB / local SQLite) and flush once Kafka reconnects.
-
-#### 3. Single Point of Failure (SPOF) Identification:
-- The single true structural choke point is the **authoritative Database write master**.
-- **Remediation:** Aurora PostgreSQL Multi-AZ provides automatic storage-level replication and active-standby failover in `< 30 seconds` with zero data loss (RPO = 0).
-
----
 
 ### Required Failure Scenarios: Deep Dive
 
@@ -454,91 +368,34 @@ A critical architectural design decision during flash sales is: **Which componen
 
 ## Local Execution & Verification Guide
 
-### 1. Run the Automated Concurrency Test Suite
+### 1. Run All Tests (Including Atomic Operations & Concurrency)
 ```bash
 cargo test --release
 ```
-**Expected Output:**
+**Output:**
 ```
+running 4 tests
+test test_atomic_inventory_boundary_conditions ... ok
+test test_atomic_rollback_and_restore_concurrency ... ok
+test test_atomic_cas_race_for_last_item ... ok
+test test_atomic_conservation_invariant_under_heavy_mixed_contention ... ok
+test result: ok. 4 passed; 0 failed
+
 running 5 tests
-test test_input_validation ... ok
 test test_idempotency_prevents_duplicate_deduction ... ok
+test test_input_validation ... ok
 test test_concurrent_idempotent_duplicate_requests ... ok
 test test_flash_sale_10k_requests_zero_oversell ... ok
 test test_order_creation_and_worker_confirmation ... ok
-
-test result: ok. 5 passed; 0 failed; finished in 0.06s
+test result: ok. 5 passed; 0 failed
 ```
 
-### 2. Start the Production Release Server
+### 2. Run the 10,000 Customer Live HTTP Simulation
 ```bash
-PORT=8080 ./target/release/flashdrop
+./scripts/simulate_10k_customers.sh
 ```
 
-### 3. Verify Endpoints via cURL
-
-#### Submit Order:
-```bash
-curl -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "userId": "user_123",
-    "productId": "iphone_16",
-    "quantity": 1,
-    "idempotencyKey": "req_alpha_999"
-  }'
-```
-Response:
-```json
-{"orderId":"ord_49f8ac3b29a140478e3e572b302e7e81","status":"PENDING"}
-```
-
-#### Test Idempotent Retry:
-```bash
-# Execute exact same request again:
-curl -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "userId": "user_123",
-    "productId": "iphone_16",
-    "quantity": 1,
-    "idempotencyKey": "req_alpha_999"
-  }'
-```
-Response (returns same orderId without deducting inventory again):
-```json
-{"orderId":"ord_49f8ac3b29a140478e3e572b302e7e81","status":"PENDING"}
-```
-
-#### Query Status:
-```bash
-curl http://localhost:8080/orders/ord_49f8ac3b29a140478e3e572b302e7e81
-```
-Response:
-```json
-{
-  "orderId": "ord_49f8ac3b29a140478e3e572b302e7e81",
-  "userId": "user_123",
-  "productId": "iphone_16",
-  "quantity": 1,
-  "idempotencyKey": "req_alpha_999",
-  "status": "CONFIRMED",
-  "createdAt": "...",
-  "updatedAt": "..."
-}
-```
-
-#### Inspect Inventory Level:
-```bash
-curl http://localhost:8080/health
-```
-Response:
-```json
-{"inventory":{"iphone_16":99},"status":"UP"}
-```
-
-### 4. Run Full Multi-Container Stack (Docker Compose)
+### 3. Spin up Full Multi-Container Stack (API + Redis + PostgreSQL)
 ```bash
 docker compose up --build
 ```
-Spawns the Rust Axum API alongside Redis 7 Alpine and PostgreSQL 16 Alpine with configured persistent volumes and health probes.

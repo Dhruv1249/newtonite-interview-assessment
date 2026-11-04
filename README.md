@@ -232,6 +232,35 @@ PASSED: Zero overselling confirmed!
 Exactly 100 orders accepted, 9,900 rejected, remaining stock is 0.
 ```
 
+### How to Run the 10,000 Customer Simulation Across Platforms
+
+#### Option A: Cross-Platform via Docker Container (Recommended for Windows / Mac / Linux)
+No local Rust toolchain or bash environment is required. Runs the full isolated stack (API + Redis + PostgreSQL + Simulation Runner):
+```bash
+# Spins up API, Redis, Postgres, executes the 10k client simulation, and reports audit:
+docker compose --profile simulation up --build
+```
+
+#### Option B: Native Windows (PowerShell)
+For Windows developers with Rust installed:
+```powershell
+.\scripts\simulate_10k_customers.ps1
+```
+
+#### Option C: Native Linux / macOS (Bash)
+```bash
+./scripts/simulate_10k_customers.sh
+```
+
+#### Option D: Direct Cargo Command
+```bash
+# Terminal 1: Start FlashDrop
+cargo run --release
+
+# Terminal 2: Run simulation client against localhost:8080
+cargo run --release --example simulate_10k_customers
+```
+
 ---
 
 ## 7. Required Failure Scenarios: Deep Dive

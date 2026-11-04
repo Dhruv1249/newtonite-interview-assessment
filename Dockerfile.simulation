@@ -1,0 +1,23 @@
+FROM rust:1.85-slim-bookworm AS builder
+
+WORKDIR /usr/src/flashdrop
+
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+
+COPY Cargo.toml Cargo.lock* ./
+COPY src ./src
+COPY examples ./examples
+
+RUN cargo build --release --example simulate_10k_customers
+
+FROM debian:bookworm-slim AS runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/src/flashdrop/target/release/examples/simulate_10k_customers /app/simulate_10k_customers
+
+ENV TARGET_URL=http://flashdrop-api:8080
+
+ENTRYPOINT ["/app/simulate_10k_customers"]

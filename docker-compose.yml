@@ -18,6 +18,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     restart: unless-stopped
 
   redis:
@@ -52,6 +57,19 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+
+  simulation:
+    build:
+      context: .
+      dockerfile: Dockerfile.simulation
+    container_name: flashdrop-sim
+    environment:
+      - TARGET_URL=http://flashdrop-api:8080
+    depends_on:
+      flashdrop-api:
+        condition: service_healthy
+    profiles:
+      - simulation
 
 volumes:
   redis_data:

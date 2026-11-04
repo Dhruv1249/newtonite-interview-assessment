@@ -141,7 +141,7 @@ A dedicated test suite in [`tests/atomic_operations_test.rs`](file:///home/dhruv
 ---
 
 ### 10,000 Customer Live HTTP Load Simulation (123k+ RPS)
-To evaluate the system under real production traffic conditions, a compiled async load tester was developed in [`src/bin/load_test_10k.rs`](file:///home/dhruv/newtonite-interview-assessment/src/bin/load_test_10k.rs) and automated in [`scripts/simulate_10k_customers.sh`](file:///home/dhruv/newtonite-interview-assessment/scripts/simulate_10k_customers.sh).
+To evaluate the system under real production traffic conditions, a compiled async load tester was developed in [`examples/simulate_10k_customers.rs`](file:///home/dhruv/newtonite-interview-assessment/examples/simulate_10k_customers.rs) and automated in [`scripts/simulate_10k_customers.sh`](file:///home/dhruv/newtonite-interview-assessment/scripts/simulate_10k_customers.sh).
 
 **Simulation Results:**
 ```

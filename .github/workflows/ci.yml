@@ -1,0 +1,42 @@
+name: FlashDrop CI & Concurrency Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Test & Concurrency Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Code Formatting Check
+        run: cargo fmt --all --check
+
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run Unit & Concurrency Test Suites
+        run: cargo test --release -- --nocapture
+
+      - name: Run 10,000 Customer Flash Sale Simulation
+        run: |
+          cargo build --release --bin flashdrop --example simulate_10k_customers
+          PORT=8088 ./target/release/flashdrop &
+          SERVER_PID=$!
+          sleep 1
+          curl -f http://127.0.0.1:8088/health
+          TARGET_URL=http://127.0.0.1:8088 ./target/release/examples/simulate_10k_customers
+          kill $SERVER_PID

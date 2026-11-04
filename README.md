@@ -285,21 +285,42 @@ cargo run --release --example simulate_10k_customers
 
 ---
 
-## 8. Quick Start & Verification Guide
+### 8. Quick Start & Verification Guide
 
-### 1. Run All Automated Tests
+### Don't Have Rust Installed? (Zero-Rust Required)
+You **do not** need Rust or Cargo installed locally to evaluate or run this project:
+
+#### 1. Complete Docker One-Liner (Windows / Mac / Linux)
+Docker uses a multi-stage build container to compile and run everything in isolation:
 ```bash
-cargo test --release
+# Builds API, Redis, Postgres, fires 10,000 requests, prints audit, and exits:
+docker compose --profile simulation up --build
 ```
-Runs 9 comprehensive unit, atomic operations, and concurrency tests.
 
-### 2. Run the 10,000 Customer Live HTTP Simulation
+#### 2. Run API via Docker + Test via Standard Python 3
 ```bash
-./scripts/simulate_10k_customers.sh
-```
-
-### 3. Spin up Full Multi-Container Stack (API + Redis + PostgreSQL)
-```bash
+# Terminal 1: Spin up container stack
 docker compose up --build
+
+# Terminal 2: Run zero-dependency standard library Python load tester (no pip install needed)
+python3 scripts/simulate_10k.py
 ```
-Spawns the Rust Axum API connected to live Redis 7 and PostgreSQL 16 containers with persistent volumes and health probes.
+
+#### 3. Instant Cloud Verification via GitHub Actions
+Don't have Docker either? Simply check the automated CI pipeline on GitHub:
+👉 [GitHub Actions Runs](https://github.com/Dhruv1249/newtonite-interview-assessment/actions)  
+Every commit automatically compiles, runs all 9 concurrency tests, and executes the 10,000 customer simulation in the cloud with full logs.
+
+---
+
+### If You Have Rust Installed
+```bash
+# Run all 9 unit, atomic, and concurrency tests:
+cargo test --release
+
+# Run native 10k simulation (Linux/macOS):
+./scripts/simulate_10k_customers.sh
+
+# Run native 10k simulation (Windows PowerShell):
+.\scripts\simulate_10k_customers.ps1
+```
